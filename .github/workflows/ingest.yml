@@ -29,6 +29,11 @@ on:
         # Not required here so a caller can run --dry-run without it; a real
         # run fails inside dispatch.py if it's missing.
         required: false
+      TRACKING_TOKEN:
+        description: "Token that can push to brain-bbqs/data-ingest-runner-tracking"
+        # Not required, for the same reason. A real run without it still
+        # records everything locally, and the push step fails loudly.
+        required: false
 
 jobs:
   Dispatch:
@@ -45,19 +50,41 @@ jobs:
           path: task-force
 
       # Fail once, up front, rather than once per project inside dispatch.
-      - name: Check Docker access
+      - name: Check runner tools
         if: ${{ inputs.dry_run != true }}
         run: |
-          if ! docker info > /dev/null; then
-            echo "::error::User '$(id -un)' cannot reach a Docker daemon (DOCKER_HOST='${DOCKER_HOST:-unset}'). Set up rootless Docker for it and point the runner's .env at its socket (see README, Runner setup)."
+          missing=""
+          for tool in apptainer singularity git-annex datalad duct; do
+            command -v "$tool" > /dev/null || missing="$missing $tool"
+          done
+          datalad containers-list --help > /dev/null 2>&1 || missing="$missing datalad-container"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing on the runner's PATH:$missing (see README, Runner setup)."
             exit 1
           fi
+
+      # Lives outside task-force/, which actions/checkout cleans every run,
+      # so the dataset and its annexed images persist between runs. The
+      # ember-tracking name and location are dispatch.py's own default.
+      - name: Update tracking dataset
+        if: ${{ inputs.dry_run != true }}
+        env:
+          TRACKING_URL: https://github.com/brain-bbqs/data-ingest-runner-tracking
+        run: |
+          set -eu
+          if [ ! -d ember-tracking ]; then
+            datalad clone "$TRACKING_URL" ember-tracking
+            git -C ember-tracking config user.name "data-ingest-runner"
+            git -C ember-tracking config user.email "data-ingest-runner@users.noreply.github.com"
+          fi
+          git -C ember-tracking pull --ff-only origin main
 
       - name: Run dispatch
         working-directory: task-force
         env:
-          # dispatch.py forwards this (by name only, never as a literal
-          # value) into every container it starts: its own dandi image
+          # dispatch.py forwards this (through the environment only, never
+          # as a literal value on a command line) into every container it
+          # starts: its own dandi image
           # (dandi download/upload run only in a container now, never
           # directly on this host) and, when set, a project's
           # container_image too, for labs whose conversion step itself
@@ -72,9 +99,10 @@ jobs:
           ONLY_FLAG: ${{ inputs.only != '' && format('--only {0}', inputs.only) || '' }}
         run: |
           set -eu
-          # No --incoming-root/--standardized-root here: dispatch.py always
-          # picks its own default (ember-incoming/ember-standardized siblings
-          # of this checkout) -- not overridable from this workflow.
+          # No --incoming-root/--standardized-root/--tracking here: dispatch.py
+          # always picks its own default (ember-incoming/ember-standardized/
+          # ember-tracking siblings of this checkout) -- not overridable from
+          # this workflow.
           REGISTRY_FLAG=""
           [ -n "${REGISTRY_PATH:-}" ] && REGISTRY_FLAG="--registry $REGISTRY_PATH"
           SESSIONS_FLAG=""
@@ -82,3 +110,27 @@ jobs:
           python3 dispatch/dispatch.py \
             $REGISTRY_FLAG $SESSIONS_FLAG \
             $DRY_RUN_FLAG $ONLY_FLAG
+
+      # Pushes even when dispatch failed: a failed step's record is committed
+      # too, and is the one most worth seeing. Only git history goes up. The
+      # annexed images stay on this runner.
+      - name: Push tracking dataset
+        if: ${{ always() && inputs.dry_run != true }}
+        env:
+          TRACKING_TOKEN: ${{ secrets.TRACKING_TOKEN }}
+        run: |
+          set -eu
+          # Nothing to push when the update step never got a clone in place.
+          [ -d ember-tracking/.datalad ] || exit 0
+          if [ -z "${TRACKING_TOKEN:-}" ]; then
+            echo "::error::TRACKING_TOKEN is not set, so this run's records were committed on the runner but not pushed."
+            exit 1
+          fi
+          # Passed as git config through the environment, so the token is
+          # never written to disk or put on a command line.
+          header="$(printf 'x-access-token:%s' "$TRACKING_TOKEN" | base64 -w0)"
+          echo "::add-mask::$header"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $header" \
+            git -C ember-tracking push origin HEAD:main git-annex

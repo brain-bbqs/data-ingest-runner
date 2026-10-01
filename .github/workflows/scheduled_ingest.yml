@@ -21,6 +21,7 @@ jobs:
     # TASK_FORCE_REF (or main). Overrides live on Manual Ingest.
     secrets:
       EMBER_DANDI_API_KEY: ${{ secrets.EMBER_DANDI_API_KEY }}
+      TRACKING_TOKEN: ${{ secrets.TRACKING_TOKEN }}
 
   # Lives in this wrapper, not ingest.yml: only the unattended scheduled
   # run emails on failure — whoever fires a manual run is already watching.
