@@ -44,6 +44,15 @@ jobs:
           ref: ${{ inputs.task_force_ref || vars.TASK_FORCE_REF || 'main' }}
           path: task-force
 
+      # Fail once, up front, rather than once per project inside dispatch.
+      - name: Check Docker access
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          if ! docker info > /dev/null; then
+            echo "::error::User '$(id -un)' cannot reach the Docker daemon. Add it to the 'docker' group and restart the runner service (see README, Runner setup)."
+            exit 1
+          fi
+
       - name: Run dispatch
         working-directory: task-force
         env:
