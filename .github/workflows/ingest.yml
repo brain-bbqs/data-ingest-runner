@@ -49,7 +49,7 @@ jobs:
         if: ${{ inputs.dry_run != true }}
         run: |
           if ! docker info > /dev/null; then
-            echo "::error::User '$(id -un)' cannot reach the Docker daemon. Add it to the 'docker' group and restart the runner service (see README, Runner setup)."
+            echo "::error::User '$(id -un)' cannot reach a Docker daemon (DOCKER_HOST='${DOCKER_HOST:-unset}'). Set up rootless Docker for it and point the runner's .env at its socket (see README, Runner setup)."
             exit 1
           fi
 
