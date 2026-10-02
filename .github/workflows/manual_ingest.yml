@@ -37,3 +37,4 @@ jobs:
       task_force_ref: ${{ inputs.task_force_ref }}
     secrets:
       EMBER_DANDI_API_KEY: ${{ secrets.EMBER_DANDI_API_KEY }}
+      TRACKING_TOKEN: ${{ secrets.TRACKING_TOKEN }}
