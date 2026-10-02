@@ -49,6 +49,25 @@ jobs:
           ref: ${{ inputs.task_force_ref || vars.TASK_FORCE_REF || 'main' }}
           path: task-force
 
+      # Everything installs into the runner account's own home from
+      # conda-forge and PyPI, so the host needs no root setup. Built on the
+      # first run and reused after. Delete ~/ember-tools to rebuild it.
+      - name: Set up runner tools
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          set -eu
+          tools="$HOME/ember-tools"
+          if [ ! -x "$tools/bin/duct" ]; then
+            rm -rf "$tools"
+            curl -fsSL -o "$RUNNER_TEMP/micromamba" \
+              https://github.com/mamba-org/micromamba-releases/releases/latest/download/micromamba-linux-64
+            chmod +x "$RUNNER_TEMP/micromamba"
+            "$RUNNER_TEMP/micromamba" create -y -q -r "$RUNNER_TEMP/mamba-root" -p "$tools" \
+              -c conda-forge apptainer git-annex python=3.12 pip
+            "$tools/bin/pip" install -q datalad datalad-container con-duct
+          fi
+          echo "$tools/bin" >> "$GITHUB_PATH"
+
       # Fail once, up front, rather than once per project inside dispatch.
       - name: Check runner tools
         if: ${{ inputs.dry_run != true }}
@@ -59,7 +78,13 @@ jobs:
           done
           datalad containers-list --help > /dev/null 2>&1 || missing="$missing datalad-container"
           if [ -n "$missing" ]; then
-            echo "::error::Missing on the runner's PATH:$missing (see README, Runner setup)."
+            echo "::error::Missing on the runner's PATH:$missing. Delete ~/ember-tools on the runner and re-run to rebuild it."
+            exit 1
+          fi
+          # Unprivileged Apptainer runs containers in user namespaces. The
+          # one host setting that needs an admin, if a distribution disables it.
+          if ! unshare --user --map-root-user true 2> /dev/null; then
+            echo "::error::Unprivileged user namespaces are disabled on this host, which rootless Apptainer needs (see README, Runner setup)."
             exit 1
           fi
 
@@ -72,10 +97,20 @@ jobs:
           TRACKING_URL: https://github.com/brain-bbqs/data-ingest-runner-tracking
         run: |
           set -eu
+          # A clone without git-annex set up commits the .sif images to git
+          # itself. Nothing in it was pushed (pushing fails without a
+          # git-annex branch), so starting over loses nothing on GitHub.
+          if [ -d ember-tracking ] && ! git -C ember-tracking config --get annex.uuid > /dev/null; then
+            echo "::warning::ember-tracking had no git-annex set up, so it was re-cloned."
+            rm -rf ember-tracking
+          fi
           if [ ! -d ember-tracking ]; then
             datalad clone "$TRACKING_URL" ember-tracking
             git -C ember-tracking config user.name "data-ingest-runner"
             git -C ember-tracking config user.email "data-ingest-runner@users.noreply.github.com"
+            # datalad clone only sets up git-annex when the remote already
+            # has a git-annex branch, which it doesn't until the first push.
+            git -C ember-tracking config --get annex.uuid > /dev/null || git -C ember-tracking annex init "ember runner"
           fi
           git -C ember-tracking pull --ff-only origin main
 
