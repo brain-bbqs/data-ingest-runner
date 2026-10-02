@@ -97,10 +97,20 @@ jobs:
           TRACKING_URL: https://github.com/brain-bbqs/data-ingest-runner-tracking
         run: |
           set -eu
+          # A clone without git-annex set up commits the .sif images to git
+          # itself. Nothing in it was pushed (pushing fails without a
+          # git-annex branch), so starting over loses nothing on GitHub.
+          if [ -d ember-tracking ] && ! git -C ember-tracking config --get annex.uuid > /dev/null; then
+            echo "::warning::ember-tracking had no git-annex set up, so it was re-cloned."
+            rm -rf ember-tracking
+          fi
           if [ ! -d ember-tracking ]; then
             datalad clone "$TRACKING_URL" ember-tracking
             git -C ember-tracking config user.name "data-ingest-runner"
             git -C ember-tracking config user.email "data-ingest-runner@users.noreply.github.com"
+            # datalad clone only sets up git-annex when the remote already
+            # has a git-annex branch, which it doesn't until the first push.
+            git -C ember-tracking config --get annex.uuid > /dev/null || git -C ember-tracking annex init "ember runner"
           fi
           git -C ember-tracking pull --ff-only origin main
 
