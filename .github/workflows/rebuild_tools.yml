@@ -1,0 +1,45 @@
+name: Rebuild Runner Tools
+
+# Wipes ~/ember-tools on the runner and reinstalls Apptainer, git-annex,
+# DataLad, datalad-container and con-duct at their latest versions, then
+# prints what it installed. Run it to pick up upgrades or to repair a broken
+# install. Ingest builds the tools itself on first use, so this is never
+# needed for a fresh runner.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Shares the ingest workflows' group, so a rebuild never pulls the tools out
+# from under a running ingest, and an ingest waits for a rebuild to finish.
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  Rebuild:
+    runs-on: [self-hosted, ember, ingest]
+    steps:
+      # In its own subdirectory: checking out to the workspace root would
+      # git-clean the ember-* data folders that live there.
+      - name: Checkout scripts
+        uses: actions/checkout@v7
+        with:
+          path: runner
+          sparse-checkout: .github/scripts
+
+      - name: Rebuild runner tools
+        run: runner/.github/scripts/setup-tools.sh --rebuild
+
+      - name: Report versions
+        run: |
+          set -eu
+          apptainer --version
+          git annex version --raw
+          echo
+          datalad --version
+          python -c "import datalad_container; print('datalad-container', datalad_container.__version__)"
+          duct --version
+          unshare --user --map-root-user true && echo "unprivileged user namespaces: enabled"
