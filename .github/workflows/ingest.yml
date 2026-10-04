@@ -34,10 +34,23 @@ on:
         # Not required, for the same reason. A real run without it still
         # records everything locally, and the push step fails loudly.
         required: false
+    outputs:
+      disk_percent:
+        description: "Percent used on the runner's work drive after this run (blank on a dry run)"
+        value: ${{ jobs.Dispatch.outputs.disk_percent }}
+      disk_summary:
+        description: "One-line summary of the runner's work drive usage"
+        value: ${{ jobs.Dispatch.outputs.disk_summary }}
 
 jobs:
   Dispatch:
     runs-on: [self-hosted, ember, ingest]
+    # The most GitHub allows a job on a self-hosted runner (5 days). The
+    # 6h default cut off a first full pass mid-download of a large dandiset.
+    timeout-minutes: 7200
+    outputs:
+      disk_percent: ${{ steps.disk.outputs.percent }}
+      disk_summary: ${{ steps.disk.outputs.summary }}
     steps:
       - name: Checkout data-ingest-task-force
         uses: actions/checkout@v7
@@ -147,6 +160,16 @@ jobs:
       # Pushes even when dispatch failed: a failed step's record is committed
       # too, and is the one most worth seeing. Only git history goes up. The
       # annexed images stay on this runner.
+      # Committed to the tracking dataset's README, so it goes up with this
+      # run's push. Never fails the run: it's a report, not part of ingest.
+      - name: Record disk usage
+        id: disk
+        if: ${{ always() && inputs.dry_run != true }}
+        continue-on-error: true
+        run: |
+          [ -d ember-tracking/.datalad ] || exit 0
+          runner/.github/scripts/update-disk-usage.sh ember-tracking "$GITHUB_WORKSPACE"
+
       - name: Push tracking dataset
         if: ${{ always() && inputs.dry_run != true }}
         env:
