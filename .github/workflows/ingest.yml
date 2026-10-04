@@ -45,6 +45,9 @@ on:
 jobs:
   Dispatch:
     runs-on: [self-hosted, ember, ingest]
+    # The most GitHub allows a job on a self-hosted runner (5 days). The
+    # 6h default cut off a first full pass mid-download of a large dandiset.
+    timeout-minutes: 7200
     outputs:
       disk_percent: ${{ steps.disk.outputs.percent }}
       disk_summary: ${{ steps.disk.outputs.summary }}
