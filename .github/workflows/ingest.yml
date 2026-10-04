@@ -168,7 +168,8 @@ jobs:
         continue-on-error: true
         run: |
           [ -d ember-tracking/.datalad ] || exit 0
-          runner/.github/scripts/update-disk-usage.sh ember-tracking "$GITHUB_WORKSPACE"
+          python3 runner/.github/scripts/update_disk_usage.py ember-tracking "$GITHUB_WORKSPACE" \
+            --threshold "${{ vars.DISK_ALERT_PERCENT || '50' }}"
 
       - name: Push tracking dataset
         if: ${{ always() && inputs.dry_run != true }}
