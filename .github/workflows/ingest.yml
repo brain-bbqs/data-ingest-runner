@@ -16,7 +16,7 @@ on:
         type: boolean
         default: false
       only:
-        description: "Restrict to one lab name (blank = all registered projects)"
+        description: "Restrict to one project: a lab name, or lab/project for a lab registered with a project name, e.g. zhang/ferret-hyperscanning (blank = all registered projects)"
         type: string
         default: ""
       task_force_ref:
@@ -123,7 +123,17 @@ jobs:
             # has a git-annex branch, which it doesn't until the first push.
             git -C ember-tracking config --get annex.uuid > /dev/null || git -C ember-tracking annex init "ember runner"
           fi
-          git -C ember-tracking pull --ff-only origin main
+          # The runner commits to records, not main, so main's history holds
+          # only the docs. The very first run branches records off main.
+          # Fast-forward only, so commits a failed push left here are kept.
+          git -C ember-tracking fetch -q origin
+          remote_records=""
+          git -C ember-tracking rev-parse -q --verify refs/remotes/origin/records > /dev/null && remote_records=refs/remotes/origin/records
+          if ! git -C ember-tracking rev-parse -q --verify refs/heads/records > /dev/null; then
+            git -C ember-tracking branch records "${remote_records:-HEAD}"
+          fi
+          git -C ember-tracking checkout -q records
+          [ -z "$remote_records" ] || git -C ember-tracking merge -q --ff-only "$remote_records"
 
       - name: Run dispatch
         working-directory: task-force
@@ -157,11 +167,9 @@ jobs:
             $REGISTRY_FLAG $SESSIONS_FLAG \
             $DRY_RUN_FLAG $ONLY_FLAG
 
-      # Pushes even when dispatch failed: a failed step's record is committed
-      # too, and is the one most worth seeing. Only git history goes up. The
-      # annexed images stay on this runner.
-      # Committed to the tracking dataset's README, so it goes up with this
-      # run's push. Never fails the run: it's a report, not part of ingest.
+      # Rewrites the tracking dataset's disk-usage branch as one commit, which
+      # the next step force-pushes. Never fails the run: it's a report, not
+      # part of ingest.
       - name: Record disk usage
         id: disk
         if: ${{ always() && inputs.dry_run != true }}
@@ -171,6 +179,10 @@ jobs:
           python3 runner/.github/scripts/update_disk_usage.py ember-tracking "$GITHUB_WORKSPACE" \
             --threshold "${{ vars.DISK_ALERT_PERCENT || '50' }}"
 
+      # Pushes even when dispatch failed: a failed step's record is committed
+      # too, and is the one most worth seeing. Only git history goes up. The
+      # annexed images stay on this runner. disk-usage is replaced, not
+      # extended, so it is force-pushed (the + refspec), and only it.
       - name: Push tracking dataset
         if: ${{ always() && inputs.dry_run != true }}
         env:
@@ -185,9 +197,11 @@ jobs:
           fi
           # Passed as git config through the environment, so the token is
           # never written to disk or put on a command line.
+          disk_usage=""
+          git -C ember-tracking rev-parse -q --verify refs/heads/disk-usage > /dev/null && disk_usage="+refs/heads/disk-usage:refs/heads/disk-usage"
           header="$(printf 'x-access-token:%s' "$TRACKING_TOKEN" | base64 -w0)"
           echo "::add-mask::$header"
           GIT_CONFIG_COUNT=1 \
           GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
           GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $header" \
-            git -C ember-tracking push origin HEAD:main git-annex
+            git -C ember-tracking push origin records git-annex $disk_usage
