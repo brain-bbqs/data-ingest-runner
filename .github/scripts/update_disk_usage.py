@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Record disk usage of the drive holding WORK_DIR in the tracking dataset.
+"""Record disk usage of the drive holding WORK_DIR on the tracking dataset's
+disk-usage branch.
 
-Each call appends a row to disk-usage/disk-usage.csv, redraws
-disk-usage/disk-usage.svg (the current usage plus its history), makes sure
-the README's "Runner disk usage" section embeds that image, and commits the
-result. Inside a GitHub Actions
-step it also sets the outputs `percent` (used, as a bare number) and
-`summary` (one line for notifications).
+Each call appends a row to disk-usage.csv and redraws disk-usage.svg (the
+current usage plus its history), then replaces the local disk-usage branch
+with a single parentless commit holding just those two files. The workflow
+force-pushes that branch, so it never accumulates history. The CSV is the
+history. The README on the dataset's main branch embeds the chart by URL.
+
+Inside a GitHub Actions step it also sets the outputs `percent` (used, as a
+bare number) and `summary` (one line for notifications).
 
     update_disk_usage.py TRACKING_DIR WORK_DIR [--threshold PERCENT]
 
@@ -17,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import math
 import os
 import subprocess
@@ -24,18 +28,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-DIRECTORY = "disk-usage"
-CSV_NAME = f"{DIRECTORY}/disk-usage.csv"
-SVG_NAME = f"{DIRECTORY}/disk-usage.svg"
-# Where earlier versions of this script kept them, at the dataset root.
-LEGACY_NAMES = ("disk-usage.csv", "disk-usage.svg")
+BRANCH = "disk-usage"
+CSV_NAME = "disk-usage.csv"
+SVG_NAME = "disk-usage.svg"
+# Where earlier versions committed these on the records branch itself.
+LEGACY_PATHS = ("disk-usage/disk-usage.csv", "disk-usage/disk-usage.svg", "disk-usage.csv", "disk-usage.svg")
 FIELDS = ("timestamp_utc", "filesystem", "mount", "size_bytes", "used_bytes", "avail_bytes", "use_percent")
 START, END = "<!-- runner-disk-usage:start -->", "<!-- runner-disk-usage:end -->"
-SECTION = f"""{START}
-## Runner disk usage
-
-![Runner disk usage]({SVG_NAME})
-{END}"""
 
 WIDTH, HEIGHT = 720, 290
 PLOT_LEFT, PLOT_RIGHT, PLOT_TOP, PLOT_BOTTOM = 56, 690, 136, 232
@@ -74,16 +73,35 @@ def measure(work_dir: Path, /) -> dict[str, str]:
     return row
 
 
-def append_row(csv_path: Path, /, *, row: dict[str, str]) -> list[dict[str, str]]:
-    is_new = not csv_path.exists()
-    with csv_path.open("a", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDS)
-        if is_new:
-            writer.writeheader()
-        writer.writerow(row)
-    with csv_path.open(newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    return rows
+def git(tracking: Path, /, *args: str, input: str | None = None, check: bool = True) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(tracking), *args], input=input, capture_output=True, text=True, check=check
+    )
+    output = result.stdout if result.returncode == 0 else ""
+    return output
+
+
+def previous_csv(tracking: Path, /) -> str:
+    """The history so far: the local branch (newest, if a push failed), the
+    pushed branch, or the CSV an earlier version committed on HEAD."""
+    git(tracking, "fetch", "-q", "origin", f"+refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}", check=False)
+    candidates = [f"refs/heads/{BRANCH}:{CSV_NAME}", f"refs/remotes/origin/{BRANCH}:{CSV_NAME}"]
+    candidates += [f"HEAD:{path}" for path in LEGACY_PATHS if path.endswith(".csv")]
+    for candidate in candidates:
+        text = git(tracking, "show", candidate, check=False)
+        if text:
+            return text
+    return ""
+
+
+def append_row(previous: str, /, *, row: dict[str, str]) -> tuple[str, list[dict[str, str]]]:
+    rows = list(csv.DictReader(io.StringIO(previous))) if previous else []
+    rows.append(row)
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue(), rows
 
 
 def render_svg(*, rows: list[dict[str, str]], threshold: int) -> str:
@@ -163,28 +181,31 @@ def render_svg(*, rows: list[dict[str, str]], threshold: int) -> str:
     return svg
 
 
-def ensure_section(readme: Path, /) -> None:
-    text = readme.read_text()
+def replace_branch(tracking: Path, /, *, files: dict[str, str], message: str) -> None:
+    """Point the local disk-usage branch at one parentless commit holding *files*."""
+    entries = []
+    for name, content in sorted(files.items()):
+        blob = git(tracking, "hash-object", "-w", "--stdin", input=content).strip()
+        entries.append(f"100644 blob {blob}\t{name}\n")
+    tree = git(tracking, "mktree", input="".join(entries)).strip()
+    commit = git(tracking, "commit-tree", tree, "-m", message).strip()
+    git(tracking, "update-ref", f"refs/heads/{BRANCH}", commit)
+
+
+def remove_legacy_files(tracking: Path, /) -> None:
+    """Take the files and README section earlier versions committed off the records branch, once."""
+    tracked = [path for path in LEGACY_PATHS if git(tracking, "ls-files", "--", path).strip()]
+    readme = tracking / "README.md"
+    text = readme.read_text() if readme.exists() else ""
     if START in text:
         before, rest = text.split(START, 1)
-        # A section whose end marker was edited away runs to the end of the file.
-        after = rest.split(END, 1)[1] if END in rest else "\n"
-        text = f"{before}{SECTION}{after}"
-    else:
-        text = f"{text.rstrip()}\n\n{SECTION}\n"
-    readme.write_text(text)
-
-
-def move_legacy_files(tracking: Path, /) -> list[str]:
-    """Move files written at the dataset root by earlier versions, keeping
-    the CSV's history. Returns the old paths, so the commit records them."""
-    (tracking / DIRECTORY).mkdir(exist_ok=True)
-    moved = []
-    for old, new in zip(LEGACY_NAMES, (CSV_NAME, SVG_NAME)):
-        if (tracking / old).exists() and not (tracking / new).exists():
-            subprocess.run(["git", "-C", str(tracking), "mv", old, new], check=True)
-            moved.append(old)
-    return moved
+        after = rest.split(END, 1)[1] if END in rest else ""
+        readme.write_text(f"{before.rstrip()}\n{after.lstrip()}" if after.strip() else f"{before.rstrip()}\n")
+        git(tracking, "add", "--", "README.md")
+    if tracked:
+        git(tracking, "rm", "-q", "--", *tracked)
+    if tracked or START in text:
+        git(tracking, "commit", "-q", "-m", f"Moved runner disk usage to the {BRANCH} branch")
 
 
 def main() -> int:
@@ -194,16 +215,15 @@ def main() -> int:
     parser.add_argument("--threshold", type=int, default=50, help="Alert threshold drawn on the chart, in percent.")
     args = parser.parse_args()
 
-    moved = move_legacy_files(args.tracking)
     row = measure(args.work)
-    rows = append_row(args.tracking / CSV_NAME, row=row)
-    (args.tracking / SVG_NAME).write_text(render_svg(rows=rows, threshold=args.threshold))
-    ensure_section(args.tracking / "README.md")
-
-    paths = ["README.md", CSV_NAME, SVG_NAME]
-    subprocess.run(["git", "-C", str(args.tracking), "add", "--", *paths], check=True)
-    message = f"Updated runner disk usage ({row['use_percent']}% used)"
-    subprocess.run(["git", "-C", str(args.tracking), "commit", "-q", "-m", message, "--", *paths, *moved], check=True)
+    text, rows = append_row(previous_csv(args.tracking), row=row)
+    svg = render_svg(rows=rows, threshold=args.threshold)
+    replace_branch(
+        args.tracking,
+        files={CSV_NAME: text, SVG_NAME: svg},
+        message=f"Runner disk usage ({row['use_percent']}% used)",
+    )
+    remove_legacy_files(args.tracking)
 
     percent = row["use_percent"]
     summary = f"{human(int(row['used_bytes']))} of {human(int(row['size_bytes']))} used ({percent}%), {human(int(row['avail_bytes']))} free on {row['mount']}"

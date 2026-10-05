@@ -13,7 +13,7 @@ on:
         type: boolean
         default: false
       only:
-        description: "Restrict to one lab name (blank = all registered projects)"
+        description: "Restrict to one project: a lab name, or lab/project for a lab registered with a project name, e.g. zhang/ferret-hyperscanning (blank = all registered projects)"
         required: false
         default: ""
       task_force_ref:
