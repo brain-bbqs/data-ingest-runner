@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Record disk usage of the drive holding WORK_DIR in the tracking dataset.
 
-Each call appends a row to disk-usage.csv, redraws disk-usage.svg (the
-current usage plus its history), makes sure the README's "Runner disk usage"
-section embeds that image, and commits the result. Inside a GitHub Actions
+Each call appends a row to disk-usage/disk-usage.csv, redraws
+disk-usage/disk-usage.svg (the current usage plus its history), makes sure
+the README's "Runner disk usage" section embeds that image, and commits the
+result. Inside a GitHub Actions
 step it also sets the outputs `percent` (used, as a bare number) and
 `summary` (one line for notifications).
 
@@ -23,16 +24,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape
 
-CSV_NAME = "disk-usage.csv"
-SVG_NAME = "disk-usage.svg"
+DIRECTORY = "disk-usage"
+CSV_NAME = f"{DIRECTORY}/disk-usage.csv"
+SVG_NAME = f"{DIRECTORY}/disk-usage.svg"
+# Where earlier versions of this script kept them, at the dataset root.
+LEGACY_NAMES = ("disk-usage.csv", "disk-usage.svg")
 FIELDS = ("timestamp_utc", "filesystem", "mount", "size_bytes", "used_bytes", "avail_bytes", "use_percent")
 START, END = "<!-- runner-disk-usage:start -->", "<!-- runner-disk-usage:end -->"
 SECTION = f"""{START}
 ## Runner disk usage
 
 ![Runner disk usage]({SVG_NAME})
-
-Updated by every ingest run from `df` on the drive holding the runner's work directory. The full history is in [`{CSV_NAME}`]({CSV_NAME}).
 {END}"""
 
 WIDTH, HEIGHT = 720, 290
@@ -163,13 +165,26 @@ def render_svg(*, rows: list[dict[str, str]], threshold: int) -> str:
 
 def ensure_section(readme: Path, /) -> None:
     text = readme.read_text()
-    if START in text and END in text:
+    if START in text:
         before, rest = text.split(START, 1)
-        after = rest.split(END, 1)[1]
+        # A section whose end marker was edited away runs to the end of the file.
+        after = rest.split(END, 1)[1] if END in rest else "\n"
         text = f"{before}{SECTION}{after}"
     else:
         text = f"{text.rstrip()}\n\n{SECTION}\n"
     readme.write_text(text)
+
+
+def move_legacy_files(tracking: Path, /) -> list[str]:
+    """Move files written at the dataset root by earlier versions, keeping
+    the CSV's history. Returns the old paths, so the commit records them."""
+    (tracking / DIRECTORY).mkdir(exist_ok=True)
+    moved = []
+    for old, new in zip(LEGACY_NAMES, (CSV_NAME, SVG_NAME)):
+        if (tracking / old).exists() and not (tracking / new).exists():
+            subprocess.run(["git", "-C", str(tracking), "mv", old, new], check=True)
+            moved.append(old)
+    return moved
 
 
 def main() -> int:
@@ -179,6 +194,7 @@ def main() -> int:
     parser.add_argument("--threshold", type=int, default=50, help="Alert threshold drawn on the chart, in percent.")
     args = parser.parse_args()
 
+    moved = move_legacy_files(args.tracking)
     row = measure(args.work)
     rows = append_row(args.tracking / CSV_NAME, row=row)
     (args.tracking / SVG_NAME).write_text(render_svg(rows=rows, threshold=args.threshold))
@@ -187,7 +203,7 @@ def main() -> int:
     paths = ["README.md", CSV_NAME, SVG_NAME]
     subprocess.run(["git", "-C", str(args.tracking), "add", "--", *paths], check=True)
     message = f"Updated runner disk usage ({row['use_percent']}% used)"
-    subprocess.run(["git", "-C", str(args.tracking), "commit", "-q", "-m", message, "--", *paths], check=True)
+    subprocess.run(["git", "-C", str(args.tracking), "commit", "-q", "-m", message, "--", *paths, *moved], check=True)
 
     percent = row["use_percent"]
     summary = f"{human(int(row['used_bytes']))} of {human(int(row['size_bytes']))} used ({percent}%), {human(int(row['avail_bytes']))} free on {row['mount']}"
