@@ -38,3 +38,5 @@ jobs:
     secrets:
       EMBER_DANDI_API_KEY: ${{ secrets.EMBER_DANDI_API_KEY }}
       TRACKING_TOKEN: ${{ secrets.TRACKING_TOKEN }}
+      MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+      MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
