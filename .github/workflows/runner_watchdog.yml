@@ -1,0 +1,97 @@
+name: Runner Watchdog
+
+# Emails as soon as the self-hosted ingest runner goes offline, and again
+# when it comes back, instead of waiting for a queued ingest to time out a
+# day later. Runs on a GitHub-hosted runner, so it works while the
+# self-hosted one is down. The last state seen is kept in the
+# RUNNER_WATCHDOG_STATE repository variable, and mail goes out only when it
+# changes, so an outage sends one alert, not one per check. The check
+# itself never fails: GitHub emails every failed scheduled run, which would
+# repeat every 15 minutes during an outage.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: runner-watchdog
+  cancel-in-progress: false
+
+jobs:
+  Check:
+    runs-on: ubuntu-latest
+    outputs:
+      state: ${{ steps.status.outputs.state }}
+      summary: ${{ steps.status.outputs.summary }}
+      changed: ${{ steps.status.outputs.changed }}
+    steps:
+      - name: Read runner status
+        id: status
+        env:
+          # A fine-grained token for this repository with Administration
+          # read-only (to list runners) and Variables read and write (to keep
+          # the state). The workflow's own token can do neither.
+          GH_TOKEN: ${{ secrets.RUNNER_STATUS_TOKEN }}
+          REPO: ${{ github.repository }}
+          PREVIOUS: ${{ vars.RUNNER_WATCHDOG_STATE }}
+        run: |
+          set -u
+          if [ -z "${GH_TOKEN:-}" ]; then
+            state=unconfigured
+            summary="RUNNER_STATUS_TOKEN is not set, so the watchdog cannot check the runner"
+          elif ! runners="$(gh api "repos/$REPO/actions/runners" --jq '
+              [.runners[] | select((["self-hosted", "ember", "ingest"] - [.labels[].name]) == [])]' 2>&1)"; then
+            state=unconfigured
+            summary="The watchdog could not list runners: $runners"
+          else
+            # The runners the ingest jobs target: every label in ingest.yml's runs-on.
+            online="$(jq '[.[] | select(.status == "online")] | length' <<< "$runners")"
+            listed="$(jq -r 'map("\(.name) (\(.status)\(if .busy then ", busy" else "" end))") | join(", ")' <<< "$runners")"
+            [ "$online" -gt 0 ] && state=online || state=offline
+            summary="Ingest runners: ${listed:-none registered}"
+          fi
+          # No state yet: treat the runner as online before, so a first
+          # check that finds it down still alerts.
+          [ "${PREVIOUS:-online}" != "$state" ] && changed=true || changed=false
+          echo "$summary. State: ${PREVIOUS:-none} -> $state."
+          [ "$state" = online ] || echo "::warning::$summary"
+          # Mail only once the new state is recorded: an unrecorded state
+          # would read as a change again on every check.
+          if [ "$changed" = true ] && ! gh variable set RUNNER_WATCHDOG_STATE -R "$REPO" --body "$state"; then
+            echo "::warning::Could not record the state, so no mail was sent. RUNNER_STATUS_TOKEN needs Variables read and write."
+            changed=false
+          fi
+          {
+            echo "state=$state"
+            echo "summary=$summary"
+            echo "changed=$changed"
+          } >> "$GITHUB_OUTPUT"
+
+  Notify:
+    permissions: {}
+    runs-on: ubuntu-latest
+    needs: [Check]
+    if: ${{ needs.Check.outputs.changed == 'true' }}
+    steps:
+      - uses: dawidd6/action-send-mail@v18
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: >-
+            ${{ needs.Check.outputs.state == 'online' && 'Runner Back Online: Data Ingest Runner'
+            || needs.Check.outputs.state == 'offline' && 'Runner Offline: Data Ingest Runner'
+            || 'Runner Watchdog Not Configured: Data Ingest Runner' }}
+          to: cody.c.baker.phd@gmail.com
+          from: Data Ingest Runner <data-ingest-runner@users.noreply.github.com>
+          body: >-
+            ${{ needs.Check.outputs.summary }}.
+            ${{ needs.Check.outputs.state == 'online' && 'Queued ingest runs will now start.'
+            || needs.Check.outputs.state == 'offline' && 'Queued ingest runs wait for it, and GitHub cancels any still waiting after 24 hours. Restart the runner service on the host.'
+            || 'Set the RUNNER_STATUS_TOKEN secret (see the README, Runner setup).' }}
+            Runners: https://github.com/${{ github.repository }}/settings/actions/runners
+            Checks: https://github.com/${{ github.repository }}/actions/workflows/runner_watchdog.yml
